@@ -21,11 +21,16 @@ public enum JasmineLegEventType
 }
 
 /// <summary>
-/// Isolated input boundary for future Jasmine belt integration.
+/// Isolated input boundary for Jasmine belt integration.
 ///
-/// Responsibilities:
-/// raw UDP -> thread-safe queue -> parse/validate -> semantic event
-/// -> existing LegPeakEventReceiver API.
+/// Two producers feed the same semantic pipeline:
+///   raw UDP    -> thread-safe queue -> parse/validate -\
+///                                                       >- semantic event
+///   local IMU  -> SubmitSemanticEvent ------------------/
+///        -> duplicate filter -> mapTopToPeak gate -> LegPeakEventReceiver.
+///
+/// Local events are routed through here rather than straight to SubmitPeak so that both
+/// producers share one set of filters, counters, and safety gates.
 ///
 /// This component never moves an Avatar, Foot Target, bone, or IK target,
 /// and it does not read or modify the gait controller state machine.
@@ -92,6 +97,10 @@ public sealed class JasmineInputAdapter : MonoBehaviour
     public int ReceivedDatagramCount => receivedDatagramCount;
     public int ParsedEventCount => parsedEventCount;
     public int ForwardedTopCount => forwardedTopCount;
+
+    /// <summary>Whether confirmed Top events reach the gait controller. Exposed so a local
+    /// detector can report "detecting but not driving" instead of appearing broken.</summary>
+    public bool MapTopToPeak => mapTopToPeak;
 
     private void Awake()
     {
@@ -389,6 +398,46 @@ public sealed class JasmineInputAdapter : MonoBehaviour
             return;
         }
 
+        DispatchSemanticEvent(parsedEvent);
+    }
+
+    /// <summary>
+    /// Entry point for a semantic leg event produced locally rather than received over UDP --
+    /// currently <c>ImuGaitEventDetector</c>, which derives Top/HitBottom/StartGoingUp from the
+    /// hip-pocket IMUs.
+    ///
+    /// Local events deliberately share this component's filters, counters, and the
+    /// <c>mapTopToPeak</c> gate, so a detector cannot become a second undocumented gait source
+    /// that bypasses them.
+    ///
+    /// Independent of <c>enableJasmineInput</c> and <c>isListening</c>: those govern the UDP
+    /// socket only, and a local detector needs no socket. Main thread only.
+    /// </summary>
+    public void SubmitSemanticEvent(
+        PeakLegSide leg,
+        JasmineLegEventType eventType,
+        double sourceTimestamp,
+        int sequence)
+    {
+        // Unlike the placeholder UDP grammar, a local detector genuinely owns both a monotonic
+        // clock and a monotonic sequence, so both are flagged as source-provided. That is what
+        // arms IsDuplicateOrOutOfOrder for this path.
+        DispatchSemanticEvent(
+            new JasmineLegEvent(
+                leg,
+                eventType,
+                sourceTimestamp,
+                true,
+                sequence,
+                true,
+                "<local-detector>"));
+    }
+
+    // Shared tail of both paths: duplicate rejection, counters, logging, and the per-type
+    // handlers. Everything above this point is transport-specific.
+    private void DispatchSemanticEvent(
+        JasmineLegEvent parsedEvent)
+    {
         if (IsDuplicateOrOutOfOrder(parsedEvent))
         {
             duplicateOrOutOfOrderCount++;
