@@ -48,6 +48,15 @@ public class imu_data_receive : MonoBehaviour
     public int[] packetsPerSecond = new int[DefaultBoardCount];
     public int[] droppedPackets = new int[DefaultBoardCount];
 
+    [Tooltip("Samples overwritten before Update could drain them. Must stay at 0 -- anything " +
+             "else means the frame rate collapsed for long enough to lose IMU data.")]
+    public int[] bufferOverflows = new int[DefaultBoardCount];
+
+    [Min(2)]
+    [Tooltip("Samples buffered per board between frames. 64 covers a ~0.6 s stall at 100 Hz, " +
+             "far more headroom than a 72 Hz render loop needs.")]
+    public int sampleBufferCapacity = 64;
+
     /// <summary>
     /// One fused sample, in the units the board sends: acceleration in m/s^2, angular velocity in
     /// rad/s. Raised on the Unity main thread, once per board per frame at most.
@@ -60,7 +69,8 @@ public class imu_data_receive : MonoBehaviour
             uint timestampMicros,
             Vector3 acceleration,
             Vector3 angularVelocity,
-            float deltaTime)
+            float deltaTime,
+            double hostReceiveTime)
         {
             Board = board;
             Sequence = sequence;
@@ -68,6 +78,7 @@ public class imu_data_receive : MonoBehaviour
             Acceleration = acceleration;
             AngularVelocity = angularVelocity;
             DeltaTime = deltaTime;
+            HostReceiveTime = hostReceiveTime;
         }
 
         public int Board { get; }
@@ -85,6 +96,11 @@ public class imu_data_receive : MonoBehaviour
         public float DeltaTime { get; }
 
         public bool HasDeltaTime => DeltaTime > 0f;
+
+        /// <summary>When the receive thread finished parsing this packet, expressed on the same
+        /// clock as Time.realtimeSinceStartupAsDouble so it can be differenced against Unity
+        /// timestamps directly. Lets a consumer measure how long the sample spent queued.</summary>
+        public double HostReceiveTime { get; }
     }
 
     /// <summary>
@@ -106,10 +122,36 @@ public class imu_data_receive : MonoBehaviour
         public float ax, ay, az;
         public float gx, gy, gz;
         public bool valid;
+
+        // Receive-thread arrival time, on the stopwatch clock. Unity's time API is main-thread
+        // only, so a plain stopwatch is used here and converted on drain.
+        public double hostSeconds;
     }
 
-    private ImuSample[] _latest;
+    // Per-board ring buffer. The receive thread pushes every accepted sample; Update drains all
+    // of them in order. A single-slot latch was enough while the only consumer thresholded a
+    // ~1 Hz swing signal, but it silently discarded ~28% of samples at 100 Hz into a 72 Hz loop.
+    // Impact detection needs those samples: a heel strike is a 20-50 ms transient, so dropping
+    // an arbitrary quarter of the stream can lose the spike itself.
+    private ImuSample[][] _ring;
+    private int[] _ringWrite;
+    private int[] _ringCount;
+    private ImuSample[] _drainScratch;
+
+    // Packets arrive from the moment the sockets open in Start, but the first Update can be over
+    // a second later while XR and shaders initialise. That backlog is stale by the time anyone
+    // could consume it, so the first drain discards it rather than fusing ~1.6 s of history in
+    // one frame and reporting the pile-up as an overflow.
+    private bool _startupBacklogCleared;
     private readonly object _sampleLock = new object();
+
+    // Monotonic clock readable from the receive thread, plus the offset that maps it onto Unity
+    // time. Recomputed every frame rather than once, so a long hitch cannot leave the two clocks
+    // permanently skewed.
+    private readonly System.Diagnostics.Stopwatch _hostClock =
+        System.Diagnostics.Stopwatch.StartNew();
+
+    private double _hostClockOffset;
 
     // Main-thread fusion state.
     private Quaternion[] _orientation;
@@ -152,7 +194,16 @@ public class imu_data_receive : MonoBehaviour
             Debug.LogError("[IMU] listenPorts is empty; nothing to listen on.");
         }
 
-        _latest = new ImuSample[_activeBoardCount];
+        _ring = new ImuSample[_activeBoardCount][];
+        _ringWrite = new int[_activeBoardCount];
+        _ringCount = new int[_activeBoardCount];
+        _drainScratch = new ImuSample[Mathf.Max(1, sampleBufferCapacity)];
+
+        for (int i = 0; i < _activeBoardCount; i++)
+        {
+            _ring[i] = new ImuSample[Mathf.Max(1, sampleBufferCapacity)];
+        }
+
         _orientation = new Quaternion[_activeBoardCount];
         _recenterOffset = new Quaternion[_activeBoardCount];
         _lastFusedMicros = new uint[_activeBoardCount];
@@ -174,6 +225,11 @@ public class imu_data_receive : MonoBehaviour
         if (droppedPackets == null || droppedPackets.Length != _activeBoardCount)
         {
             droppedPackets = new int[_activeBoardCount];
+        }
+
+        if (bufferOverflows == null || bufferOverflows.Length != _activeBoardCount)
+        {
+            bufferOverflows = new int[_activeBoardCount];
         }
 
         for (int i = 0; i < _activeBoardCount; i++)
@@ -263,10 +319,26 @@ public class imu_data_receive : MonoBehaviour
         if (!float.TryParse(p[7], NumberStyles.Float, inv, out s.gy)) return;
         if (!float.TryParse(p[8], NumberStyles.Float, inv, out s.gz)) return;
         s.valid = true;
+        s.hostSeconds = _hostClock.Elapsed.TotalSeconds;
 
         lock (_sampleLock)
         {
-            _latest[boardIndex] = s;
+            ImuSample[] ring = _ring[boardIndex];
+
+            ring[_ringWrite[boardIndex]] = s;
+            _ringWrite[boardIndex] = (_ringWrite[boardIndex] + 1) % ring.Length;
+
+            if (_ringCount[boardIndex] < ring.Length)
+            {
+                _ringCount[boardIndex]++;
+            }
+            else
+            {
+                // Full: the write above just overwrote the oldest unread sample. Counted rather
+                // than silently tolerated, so a stall is visible instead of looking like jitter.
+                bufferOverflows[boardIndex]++;
+            }
+
             _packetCounter[boardIndex]++;
             if (_hasSeq[boardIndex] && s.seq > _lastSeq[boardIndex] + 1)
                 droppedPackets[boardIndex] += (int)(s.seq - _lastSeq[boardIndex] - 1);
@@ -279,31 +351,84 @@ public class imu_data_receive : MonoBehaviour
 
     void Update()
     {
+        _hostClockOffset =
+            Time.realtimeSinceStartupAsDouble - _hostClock.Elapsed.TotalSeconds;
+
         for (int i = 0; i < _activeBoardCount; i++)
         {
-            ImuSample s;
+            // Copy the pending samples out under the lock, then release it before fusing and
+            // raising events. Subscribers run arbitrary user code; holding the lock across that
+            // would stall the receive thread and turn a slow subscriber into dropped packets.
+            int pending;
+
             lock (_sampleLock)
             {
-                s = _latest[i];
-                _latest[i].valid = false; // only fuse each sample once
+                pending = _ringCount[i];
+
+                if (pending > 0)
+                {
+                    ImuSample[] ring = _ring[i];
+                    int read = (_ringWrite[i] - pending + ring.Length) % ring.Length;
+
+                    for (int n = 0; n < pending; n++)
+                    {
+                        _drainScratch[n] = ring[(read + n) % ring.Length];
+                    }
+
+                    _ringCount[i] = 0;
+                }
             }
-            if (!s.valid) continue;
 
-            // Only the newest sample of the frame survives -- at 100 Hz into a 72 Hz render loop
-            // some are dropped. Harmless for a ~1 Hz gait signal, which is still ~70x oversampled.
-            float dt = Fuse(i, s);
+            if (pending <= 0) continue;
 
+            if (!_startupBacklogCleared)
+            {
+                continue;
+            }
+
+            // Every sample is fused and published, oldest first. Fuse integrates per-sample
+            // board-clock deltas, so skipping samples previously understated the rotation it
+            // saw; draining in order makes the fused orientation correct as well as complete.
+            for (int n = 0; n < pending; n++)
+            {
+                ImuSample s = _drainScratch[n];
+
+                if (!s.valid) continue;
+
+                float dt = Fuse(i, s);
+
+                SampleFused?.Invoke(
+                    new ImuSampleSnapshot(
+                        i,
+                        s.seq,
+                        s.tMicros,
+                        new Vector3(s.ax, s.ay, s.az),
+                        new Vector3(s.gx, s.gy, s.gz),
+                        dt,
+                        s.hostSeconds + _hostClockOffset));
+            }
+
+            // Once per frame, not once per sample -- the cube is a display, and the render loop
+            // cannot show intermediate orientations anyway.
             if (i < cubes.Length && cubes[i] != null)
                 cubes[i].localRotation = _recenterOffset[i] * _orientation[i];
+        }
 
-            SampleFused?.Invoke(
-                new ImuSampleSnapshot(
-                    i,
-                    s.seq,
-                    s.tMicros,
-                    new Vector3(s.ax, s.ay, s.az),
-                    new Vector3(s.gx, s.gy, s.gz),
-                    dt));
+        if (!_startupBacklogCleared)
+        {
+            // Whatever queued up before this point was history, not live data. Zero the overflow
+            // counters with it so they mean "data was lost while running", which is the only
+            // reading worth acting on.
+            _startupBacklogCleared = true;
+
+            lock (_sampleLock)
+            {
+                for (int i = 0; i < _activeBoardCount; i++)
+                {
+                    bufferOverflows[i] = 0;
+                    droppedPackets[i] = 0;
+                }
+            }
         }
 
         if (Time.unscaledTime >= _nextRateSample)

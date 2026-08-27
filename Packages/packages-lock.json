@@ -53,8 +53,8 @@
       "url": "https://packages.unity.com"
     },
     "com.meta.xr.sdk.core": {
-      "version": "203.0.0",
-      "depth": 1,
+      "version": "205.0.0",
+      "depth": 0,
       "source": "registry",
       "dependencies": {
         "com.unity.xr.hands": "1.7.2",
@@ -355,7 +355,7 @@
     },
     "com.unity.xr.hands": {
       "version": "1.7.2",
-      "depth": 2,
+      "depth": 1,
       "source": "registry",
       "dependencies": {
         "com.unity.modules.xr": "1.0.0",
@@ -388,11 +388,22 @@
       },
       "url": "https://packages.unity.com"
     },
-    "com.unity.xr.openxr": {
-      "version": "1.16.1",
+    "com.unity.xr.oculus": {
+      "version": "4.5.5",
       "depth": 0,
       "source": "registry",
       "dependencies": {
+        "com.unity.xr.management": "4.4.0",
+        "com.unity.modules.androidjni": "1.0.0"
+      },
+      "url": "https://packages.unity.com"
+    },
+    "com.unity.xr.openxr": {
+      "version": "1.18.0",
+      "depth": 0,
+      "source": "registry",
+      "dependencies": {
+        "com.unity.modules.xr": "1.0.0",
         "com.unity.inputsystem": "1.6.3",
         "com.unity.xr.core-utils": "2.3.0",
         "com.unity.xr.management": "4.4.0",

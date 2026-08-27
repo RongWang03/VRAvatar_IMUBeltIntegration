@@ -2,6 +2,7 @@
   "dependencies": {
     "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main",
     "com.meta.xr.sdk.all": "203.0.0",
+    "com.meta.xr.sdk.core": "205.0.0",
     "com.meta.xr.sdk.interaction.ovr": "203.0.0",
     "com.meta.xr.sdk.movement": "https://github.com/oculus-samples/Unity-Movement.git#v201.0.0",
     "com.unity.ai.navigation": "2.0.12",
@@ -15,7 +16,8 @@
     "com.unity.timeline": "1.8.12",
     "com.unity.ugui": "2.0.0",
     "com.unity.visualscripting": "1.9.11",
-    "com.unity.xr.openxr": "1.16.1",
+    "com.unity.xr.oculus": "4.5.5",
+    "com.unity.xr.openxr": "1.18.0",
     "com.unity.modules.accessibility": "1.0.0",
     "com.unity.modules.ai": "1.0.0",
     "com.unity.modules.androidjni": "1.0.0",

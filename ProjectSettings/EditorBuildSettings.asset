@@ -9,6 +9,7 @@ EditorBuildSettings:
     path: Assets/Scenes/PeakEventComparison/IK_LegWalkingDemo_LowerBodyOnly_EyeAligned.unity
     guid: b61324adf05e12c41988639f5baa23d5
   m_configObjects:
+    Unity.XR.Oculus.Settings: {fileID: 11400000, guid: ca624ae9ea2071e4bb72bcfef8b6eb4b, type: 2}
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
     com.unity.xr.management.loader_settings: {fileID: 11400000, guid: 0d5f7be709278e64796bd73736253c1c, type: 2}
     com.unity.xr.openxr.settings4: {fileID: 11400000, guid: 6f2da4a0fd3ef114991b8a078f64c028, type: 2}

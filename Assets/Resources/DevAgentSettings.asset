@@ -13,12 +13,13 @@ MonoBehaviour:
   m_Name: DevAgentSettings
   m_EditorClassIdentifier: 
   enabled: 1
-  serverAddress: 10.116.204.82
+  serverAddress: 192.168.8.201
   serverPort: 48735
   mcpServerPort: 48736
   witConfiguration: {fileID: 0}
+  witClientAccessToken: 
   pushToTalkButton: 1
   handPushToTalkGesture: 0
   enableDelayedRelease: 1
   releaseDelay: 0.8
-  accessToken: 44d907706a2a4f71b61ea494060bcb35
+  accessToken: 3cc751976f5742028fbafc5c5d2a1b7e
